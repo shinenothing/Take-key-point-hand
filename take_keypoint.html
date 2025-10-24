@@ -1,78 +1,164 @@
 <!doctype html>
 <html lang="vi">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Nhận diện keypoint tay (HTML + MediaPipe)</title>
-<style>
-  body{font-family:system-ui,Segoe UI,Roboto; margin:0; background:#111; display:flex; justify-content:center; align-items:center; height:100vh; overflow:hidden}
-  #wrap{position:relative; width:960px; height:720px}
-  video, canvas{position:absolute; top:0; left:0; width:100%; height:100%; border-radius:8px}
-  #video{transform:scaleX(-1);} /* lật gương */
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Đếm ngón tay — MediaPipe Hands</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    .wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:12px}
+    video{display:none}
+    canvas{border-radius:12px;box-shadow:0 6px 22px rgba(0,0,0,0.18)}
+    #countBadge{position:absolute;top:24px;left:24px;background:rgba(0,0,0,0.6);color:#fff;padding:10px 14px;border-radius:12px;font-size:22px}
+    .hint{color:#444;font-size:14px}
+    #container{position:relative;display:inline-block}
+  </style>
 </head>
 <body>
-  <div id="wrap">
-    <video id="video" autoplay playsinline></video>
-    <canvas id="canvas"></canvas>
+  <div class="wrap">
+    <h2>Đếm ngón tay (1 → 5)</h2>
+    <div id="container">
+      <div id="countBadge">—</div>
+      <video id="input_video" autoplay playsinline></video>
+      <canvas id="output_canvas" width="640" height="480"></canvas>
+    </div>
+    <div class="hint">Đưa bàn tay ra trước camera, hướng lòng bàn tay về phía máy. Ánh sáng tốt sẽ cho kết quả chính xác hơn. :))</div>
   </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <!-- MediaPipe JS (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
-<script>
-const video = document.getElementById('video');
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+  <script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const countBadge = document.getElementById('countBadge');
 
-const hands = new Hands({locateFile: (file) =>
-  `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-});
-hands.setOptions({
-  maxNumHands: 2,
-  modelComplexity: 1,
-  minDetectionConfidence: 0.6,
-  minTrackingConfidence: 0.6
-});
-
-hands.onResults(drawResults);
-
-async function initCamera(){
-  const stream = await navigator.mediaDevices.getUserMedia({video:true});
-  video.srcObject = stream;
-  await video.play();
-  const camera = new Camera(video, {
-    onFrame: async () => await hands.send({image: video}),
-    width: 960, height: 720
-  });
-  camera.start();
-}
-
-function drawResults(results){
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-
-  // vẽ khung video nền
-  ctx.save();
-  ctx.scale(-1,1);
-  ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
-  ctx.restore();
-
-  if(results.multiHandLandmarks){
-    for(const landmarks of results.multiHandLandmarks){
-      // vẽ đường nối (xanh lá)
-      drawConnectors(ctx, landmarks, HAND_CONNECTIONS,
-        {color:'#00FF66', lineWidth:3});
-      // vẽ điểm (vàng)
-      drawLandmarks(ctx, landmarks,
-        {color:'#FFD700', fillColor:'#FFEE88', radius:4});
+    // Hàm kiểm tra một ngón mở
+    function isFingerOpen(landmarks, tipIdx, pipIdx, handednessLabel) {
+      // Với các ngón chỉ (index,middle,ring,pinky): nếu tip.y < pip.y => mở (camera coordinate: y nhỏ hơn là lên trên)
+      if (tipIdx !== 4) {
+        return landmarks[tipIdx].y < landmarks[pipIdx].y - 0.02; // margin
+      }
+      // Với ngón cái (thumb): so sánh theo x tùy tay trái/ phải
+      // Nếu là Right hand, ngón cái mở khi tip.x > ip.x (tỉ lệ mirror phụ thuộc camera)
+      const tip = landmarks[4];
+      const ip = landmarks[3];
+      if (handednessLabel === 'Right') {
+        return tip.x > ip.x + 0.02;
+      } else {
+        return tip.x < ip.x - 0.02;
+      }
     }
-  }
-}
 
-initCamera().catch(e=>alert('Không truy cập được webcam: '+e));
-</script>
+    // Tính tâm lòng bàn tay (palm center) — trung bình một vài landmark đặc trưng
+    function computePalmCenter(landmarks) {
+      const indices = [0, 1, 2, 5, 9];
+      let x = 0, y = 0;
+      for (const i of indices) { x += landmarks[i].x; y += landmarks[i].y; }
+      x /= indices.length; y /= indices.length;
+      // chuyển về pixel
+      return {x: x * canvasElement.width, y: y * canvasElement.height};
+    }
+
+    // Khởi tạo MediaPipe Hands
+    const hands = new Hands({locateFile: (file) => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults(onResults);
+
+    // Camera
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({image: videoElement});
+      },
+      width: 640,
+      height: 480
+    });
+    camera.start().catch(err => {
+      console.error('Không thể khởi camera:', err);
+      alert('Không thể khởi động camera. Hãy cho phép quyền camera và thử lại.');
+    });
+
+    function onResults(results) {
+      // vẽ nền video
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        const handedness = (results.multiHandedness && results.multiHandedness[0]) ? results.multiHandedness[0].label : 'Right';
+
+        // vẽ các đường nối và điểm landmark mặc định từ MediaPipe
+        drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {lineWidth:2});
+        drawLandmarks(canvasCtx, landmarks, {lineWidth:2, radius:3});
+
+        // tính tâm lòng bàn tay
+        const palm = computePalmCenter(landmarks);
+
+        // vẽ một vòng tròn ở lòng bàn tay để neo chỉ số
+        canvasCtx.beginPath();
+        canvasCtx.fillStyle = 'rgba(0,0,0,0.45)';
+        canvasCtx.arc(palm.x, palm.y, 36, 0, Math.PI*2);
+        canvasCtx.fill();
+
+        // Đếm ngón mở: index(8,6), middle(12,10), ring(16,14), pinky(20,18), thumb(4,3)
+        const openIndex = isFingerOpen(landmarks, 8, 6, handedness) ? 1 : 0;
+        const openMiddle = isFingerOpen(landmarks, 12, 10, handedness) ? 1 : 0;
+        const openRing = isFingerOpen(landmarks, 16, 14, handedness) ? 1 : 0;
+        const openPinky = isFingerOpen(landmarks, 20, 18, handedness) ? 1 : 0;
+        const openThumb = isFingerOpen(landmarks, 4, 3, handedness) ? 1 : 0;
+
+        const totalOpen = openIndex + openMiddle + openRing + openPinky + openThumb;
+
+        // vẽ số ở giữa lòng tay
+        canvasCtx.fillStyle = '#fff';
+        canvasCtx.font = 'bold 28px Arial';
+        canvasCtx.textAlign = 'center';
+        canvasCtx.textBaseline = 'middle';
+        canvasCtx.fillText(totalOpen.toString(), palm.x, palm.y);
+
+        // cập nhật badge UI
+        countBadge.textContent = totalOpen === 0 ? '0' : totalOpen.toString();
+
+        // vẽ nhãn từng ngón (nhỏ) neo sát lòng bàn tay (ví dụ chỉ để minh họa vị trí ngón)
+        const fingerTips = [8, 12, 16, 20, 4];
+        for (let i = 0; i < fingerTips.length; i++) {
+          const pt = landmarks[fingerTips[i]];
+          const px = pt.x * canvasElement.width;
+          const py = pt.y * canvasElement.height;
+          // đường nối từ lòng bàn tay tới đầu ngón
+          canvasCtx.beginPath();
+          canvasCtx.moveTo(palm.x, palm.y);
+          canvasCtx.lineTo(px, py);
+          canvasCtx.strokeStyle = 'rgba(255,255,255,0.6)';
+          canvasCtx.lineWidth = 1;
+          canvasCtx.stroke();
+          // chấm nhỏ ở đầu ngón
+          canvasCtx.beginPath();
+          canvasCtx.fillStyle = 'rgba(255,255,255,0.9)';
+          canvasCtx.arc(px, py, 6, 0, Math.PI*2);
+          canvasCtx.fill();
+        }
+
+      } else {
+        // không thấy tay
+        countBadge.textContent = '—';
+      }
+
+      canvasCtx.restore();
+    }
+  </script>
 </body>
 </html>
